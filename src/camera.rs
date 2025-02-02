@@ -2,6 +2,7 @@ use libloading::Library;
 use std::ffi::{CStr, CString, OsStr};
 use std::ffi::{c_int, c_uint, c_char, c_void, c_longlong, c_double};
 use std::fmt::{Display, Formatter};
+use std::ops::{Index, IndexMut};
 
 
 
@@ -111,7 +112,7 @@ impl Tlc {
             .collect())
     }
 
-    pub fn open_camera(&self, id: &str) -> TlcResult<TlcCamera> {
+    pub fn open_camera(&self, id: &str) -> TlcResult<Camera> {
         let mut handle = std::ptr::null();
 
         tlc_call!(
@@ -119,13 +120,14 @@ impl Tlc {
             CString::new(id).unwrap().as_ptr(), &mut handle
         )?;
 
-        Ok(TlcCamera {
+        Ok(Camera {
             lib: &self.lib,
-            handle
+            handle,
+            id: id.to_string()
         })
     }
 
-    pub fn open_first_camera(&self) -> TlcResult<Option<TlcCamera>> {
+    pub fn open_first_camera(&self) -> TlcResult<Option<Camera>> {
         self.discover_cameras()?
             .first()
             .map(|id| self.open_camera(&id))
@@ -171,21 +173,49 @@ impl Roi {
 
 
 
-pub struct Frame<D> {
+pub struct Frame<D: AsRef<[u16]>> {
     pub data: D,
     pub roi: Roi,
     pub index: usize,
     metadata: Vec<c_char>
 }
 
+pub type OFrame = Frame<Vec<u16>>;
+pub type BFrame<'a> = Frame<&'a [u16]>;
 
+impl<D: AsRef<[u16]>> Index<[usize; 2]> for Frame<D> {
+    type Output = u16;
 
-pub struct TlcCamera<'a> {
-    lib: &'a Library,
-    handle: handle_t
+    fn index(&self, idx: [usize; 2]) -> &u16 {
+        let (w, h) = self.roi.dim();
+
+        if idx[0] >= w { panic!("x index out of range in frame"); }
+        if idx[1] >= h { panic!("y index out of range in frame"); }
+
+        &self.data.as_ref()[w*idx[1]+idx[0]]
+    }
 }
 
-impl<'a> Drop for TlcCamera<'a> {
+impl<D: AsRef<[u16]> + AsMut<[u16]>> IndexMut<[usize; 2]> for Frame<D> {
+    fn index_mut(&mut self, idx: [usize; 2]) -> &mut u16 {
+        let (w, h) = self.roi.dim();
+
+        if idx[0] >= w { panic!("x index out of range in frame"); }
+        if idx[1] >= h { panic!("y index out of range in frame"); }
+
+        &mut self.data.as_mut()[w*idx[1]+idx[0]]
+    }
+}
+
+
+
+pub struct Camera<'a> {
+    lib: &'a Library,
+    handle: handle_t,
+    id: String
+}
+
+impl<'a> Drop for Camera<'a> {
     fn drop(&mut self) {
         tlc_call!(
             &self.lib, "tl_camera_close_camera", CloseCameraFn;
@@ -194,7 +224,11 @@ impl<'a> Drop for TlcCamera<'a> {
     }
 }
 
-impl<'a> TlcCamera<'a> {
+impl<'a> Camera<'a> {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     pub fn set_exposure_us(&self, t: usize) -> TlcResult<()> {
         tlc_call!(
             &self.lib, "tl_camera_set_exposure_time", SetExposureTimeFn;
@@ -326,7 +360,7 @@ impl<'a> TlcCamera<'a> {
     }
 
     pub fn map_pending_frame<F, R>(&self, mut f: F) -> TlcResult<Option<R>>
-    where F: FnMut(Frame<&[u16]>) -> R {
+    where F: FnMut(BFrame) -> R {
         let mut img_ptr = std::ptr::null();
         let mut frame_idx = 0;
         let mut metadata_ptr = std::ptr::null();
@@ -351,7 +385,7 @@ impl<'a> TlcCamera<'a> {
             std::slice::from_raw_parts(metadata_ptr, metadata_len as usize)
         };
 
-        let frame = Frame {
+        let frame = BFrame {
             data: img,
             roi: roi,
             index: frame_idx as usize,
@@ -361,14 +395,25 @@ impl<'a> TlcCamera<'a> {
         Ok(Some(f(frame)))
     }
 
-    pub fn pending_frame(&self) -> TlcResult<Option<Frame<Vec<u16>>>> {
+    pub fn pending_frame(&self) -> TlcResult<Option<OFrame>> {
         self.map_pending_frame(|f| {
-            Frame {
+            OFrame {
                 data: f.data.to_vec(),
                 roi: f.roi,
                 index: f.index,
                 metadata: f.metadata
             }
         })
+    }
+
+    pub fn snapshot(&self) -> TlcResult<Option<OFrame>> {
+        self.arm(1)?;
+        self.trigger()?;
+
+        let frame = self.pending_frame()?;
+
+        self.disarm()?;
+
+        Ok(frame)
     }
 }
