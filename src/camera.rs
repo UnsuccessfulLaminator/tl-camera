@@ -3,6 +3,7 @@ use std::ffi::{CStr, CString, OsStr};
 use std::ffi::{c_int, c_uint, c_char, c_void, c_longlong, c_double};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
+use std::sync::mpsc;
 
 
 
@@ -10,6 +11,7 @@ use std::ops::{Index, IndexMut};
 type handle_t = *const c_void;
 
 type OpenSdkFn = unsafe extern fn() -> c_int;
+type CloseSdkFn = unsafe extern fn() -> c_int;
 type GetLastErrorFn = unsafe extern fn() -> *const c_char;
 type DiscoverAvailableCamerasFn = unsafe extern fn(*mut c_char, c_int) -> c_int;
 type OpenCameraFn = unsafe extern fn(*const c_char, *mut handle_t) -> c_int;
@@ -25,6 +27,10 @@ type SetImagePollTimeoutFn = unsafe extern fn(handle_t, c_int) -> c_int;
 type ArmFn = unsafe extern fn(handle_t, c_int) -> c_int;
 type DisarmFn = unsafe extern fn(handle_t) -> c_int;
 type IssueSoftwareTriggerFn = unsafe extern fn(handle_t) -> c_int;
+
+type SetFrameAvailableCallbackFn = unsafe extern fn(
+    handle_t, Option<FrameCallbackPtr>, *mut c_void
+) -> c_int;
 
 type GetPendingFrameOrNullFn = unsafe extern fn(
     handle_t, *mut *const u16, *mut c_int, *mut *const c_char, *mut c_int
@@ -79,6 +85,13 @@ type TlcResult<T> = Result<T, TlcError>;
 
 pub struct Tlc {
     lib: Library
+}
+
+impl Drop for Tlc {
+    fn drop(&mut self) {
+        tlc_call!(&self.lib, "tl_camera_close_sdk", CloseSdkFn;)
+            .expect("couldn't close tl_camera SDK");
+    }
 }
 
 impl Tlc {
@@ -217,6 +230,8 @@ pub struct Camera<'a> {
 
 impl<'a> Drop for Camera<'a> {
     fn drop(&mut self) {
+        self.disarm().expect("couldn't disarm camera");
+
         tlc_call!(
             &self.lib, "tl_camera_close_camera", CloseCameraFn;
             self.handle
@@ -354,8 +369,8 @@ impl<'a> Camera<'a> {
         Ok(Roi {
             x0: x0 as usize,
             y0: y0 as usize,
-            x1: x1 as usize,
-            y1: y1 as usize
+            x1: x1 as usize+1,
+            y1: y1 as usize+1
         })
     }
 
@@ -406,14 +421,99 @@ impl<'a> Camera<'a> {
         })
     }
 
-    pub fn snapshot(&self) -> TlcResult<Option<OFrame>> {
-        self.arm(1)?;
+    pub fn snapshot(&self, timeout_ms: usize) -> TlcResult<Option<OFrame>> {
+        self.set_frames_per_trigger(Frames::Limited(1))?;
+        self.set_frame_timeout_ms(10)?;
+        self.arm(2)?;
         self.trigger()?;
 
-        let frame = self.pending_frame()?;
+        let inst = std::time::Instant::now();
+        let mut frame = None;
+
+        while (inst.elapsed().as_millis() as usize) < timeout_ms {
+            frame = self.pending_frame()?;
+
+            if frame.is_some() { break; }
+        }
 
         self.disarm()?;
 
         Ok(frame)
     }
+
+    fn set_frame_callback_raw(&self, f: FrameCallbackPtr, ctx: *mut c_void)
+    -> TlcResult<()> {
+        tlc_call!(
+            &self.lib, "tl_camera_set_frame_available_callback",
+            SetFrameAvailableCallbackFn;
+            self.handle, Some(f), ctx
+        )
+    }
+    
+    fn remove_frame_callback(&self) -> TlcResult<()> {
+        tlc_call!(
+            &self.lib, "tl_camera_set_frame_available_callback",
+            SetFrameAvailableCallbackFn;
+            self.handle, None, std::ptr::null_mut()
+        )
+    }
+
+    // VERY BUGGY DOES NOT WORK
+    /*pub fn for_frames<F>(&self, n: usize, timeout_ms: usize, mut f: F)
+    -> TlcResult<()> where F: FnMut(OFrame) {
+        let roi = self.roi()?;
+        let img_len = roi.area();
+        let (tx, rx) = mpsc::channel::<Vec<u16>>();
+        let mut ctx = (img_len, tx);
+        let ctx_ptr = &mut ctx as *mut _ as *mut c_void;
+
+        self.set_frame_callback_raw(snapshot_cb, ctx_ptr)?;
+        self.set_frames_per_trigger(Frames::Limited(n))?;
+        self.arm(2)?;
+        self.trigger()?;
+
+        use std::time::Duration;
+
+        for i in 0..n {
+            let img = rx.recv_timeout(Duration::from_millis(timeout_ms as u64));
+
+            let Ok(img) = img else {
+                self.disarm()?;
+                self.remove_frame_callback()?;
+
+                return Err(TlcError("snapshot timed out".to_string()));
+            };
+
+            let frame = OFrame {
+                data: img,
+                roi: roi,
+                index: i,
+                metadata: vec![]
+            };
+
+            f(frame);
+        }
+
+        self.disarm()?;
+        self.remove_frame_callback()
+    }*/
+}
+
+type FrameCallbackPtr = unsafe extern "C" fn(
+    handle_t, *mut u16, c_int, *mut c_char, c_int, *mut c_void
+);
+
+// Callback for taking a frame and copying its contents to a vector,
+// which is sent back to the main thread by a channel
+unsafe extern "C" fn snapshot_cb(
+    handle: handle_t, img_ptr: *mut u16, frame_idx: c_int,
+    metadata: *mut c_char, metadata_len: c_int,
+    ctx: *mut c_void
+) {
+    let ctx = ctx as *mut (usize, mpsc::Sender<Vec<u16>>);
+    let img_len = (*ctx).0;
+    let tx = &(*ctx).1;
+    let img = unsafe { std::slice::from_raw_parts(img_ptr, img_len) };
+
+    tx.send(img.to_vec()).unwrap();
 }
