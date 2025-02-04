@@ -133,11 +133,9 @@ impl Tlc {
             CString::new(id).unwrap().as_ptr(), &mut handle
         )?;
 
-        Ok(Camera {
-            lib: &self.lib,
-            handle,
-            id: id.to_string()
-        })
+        let cam = Camera::new(&self.lib, handle, id)?;
+
+        Ok(cam)
     }
 
     pub fn open_first_camera(&self) -> TlcResult<Option<Camera>> {
@@ -158,7 +156,7 @@ pub enum Frames {
 
 
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
 pub struct Roi {
     pub x0: usize,
     pub y0: usize,
@@ -225,7 +223,8 @@ impl<D: AsRef<[u16]> + AsMut<[u16]>> IndexMut<[usize; 2]> for Frame<D> {
 pub struct Camera<'a> {
     lib: &'a Library,
     handle: handle_t,
-    id: String
+    id: String,
+    roi: Roi
 }
 
 impl<'a> Drop for Camera<'a> {
@@ -240,6 +239,43 @@ impl<'a> Drop for Camera<'a> {
 }
 
 impl<'a> Camera<'a> {
+    fn new(lib: &'a Library, handle: handle_t, id: &str) -> TlcResult<Self> {
+        let mut cam = Self {
+            lib, handle,
+            id: id.to_string(),
+            roi: Roi::default()
+        };
+
+        cam.set_frame_timeout_ms(10)?;
+        cam.update_roi()?;
+
+        Ok(cam)
+    }
+
+    // Update the cached ROI by reading from the camera.
+    // This is only called when the camera is initialised, and any subsequent
+    // operations involving the ROI can set/get the cached version, and send it
+    // to the camera when necessary.
+    fn update_roi(&mut self) -> TlcResult<()> {
+        let (mut x0, mut y0, mut x1, mut y1) = (0, 0, 0, 0);
+
+        tlc_call!(
+            &self.lib, "tl_camera_get_roi", GetRoiFn;
+            self.handle, &mut x0, &mut y0, &mut x1, &mut y1
+        )?;
+
+        self.roi.x0 = x0 as usize;
+        self.roi.y0 = y0 as usize;
+        self.roi.x1 = x1 as usize+1;
+        self.roi.y1 = y1 as usize+1;
+
+        Ok(())
+    }
+
+    pub fn roi(&self) -> Roi {
+        self.roi
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -331,7 +367,7 @@ impl<'a> Camera<'a> {
         )
     }
 
-    pub fn set_frame_timeout_ms(&self, t: usize) -> TlcResult<()> {
+    pub fn set_frame_timeout_ms(&self, t: u64) -> TlcResult<()> {
         tlc_call!(
             &self.lib, "tl_camera_set_image_poll_timeout",
             SetImagePollTimeoutFn;
@@ -358,22 +394,6 @@ impl<'a> Camera<'a> {
         )
     }
 
-    pub fn roi(&self) -> TlcResult<Roi> {
-        let (mut x0, mut y0, mut x1, mut y1) = (0, 0, 0, 0);
-
-        tlc_call!(
-            &self.lib, "tl_camera_get_roi", GetRoiFn;
-            self.handle, &mut x0, &mut y0, &mut x1, &mut y1
-        )?;
-
-        Ok(Roi {
-            x0: x0 as usize,
-            y0: y0 as usize,
-            x1: x1 as usize+1,
-            y1: y1 as usize+1
-        })
-    }
-
     pub fn map_pending_frame<F, R>(&self, mut f: F) -> TlcResult<Option<R>>
     where F: FnMut(BFrame) -> R {
         let mut img_ptr = std::ptr::null();
@@ -390,8 +410,7 @@ impl<'a> Camera<'a> {
 
         if img_ptr.is_null() { return Ok(None); }
 
-        let roi = self.roi()?;
-        let img_len = roi.area();
+        let img_len = self.roi.area();
         let img = unsafe {
             std::slice::from_raw_parts(img_ptr, img_len)
         };
@@ -402,7 +421,7 @@ impl<'a> Camera<'a> {
 
         let frame = BFrame {
             data: img,
-            roi: roi,
+            roi: self.roi,
             index: frame_idx as usize,
             metadata: metadata.to_vec()
         };
@@ -421,20 +440,26 @@ impl<'a> Camera<'a> {
         })
     }
 
-    pub fn snapshot(&self, timeout_ms: usize) -> TlcResult<Option<OFrame>> {
-        self.set_frames_per_trigger(Frames::Limited(1))?;
-        self.set_frame_timeout_ms(10)?;
-        self.arm(2)?;
-        self.trigger()?;
-
+    pub fn wait_for_frame(&self, timeout_ms: u64)
+    -> TlcResult<Option<OFrame>> {
         let inst = std::time::Instant::now();
         let mut frame = None;
-
-        while (inst.elapsed().as_millis() as usize) < timeout_ms {
+        
+        while (inst.elapsed().as_millis() as u64) < timeout_ms {
             frame = self.pending_frame()?;
 
             if frame.is_some() { break; }
         }
+
+        Ok(frame)
+    }
+
+    pub fn snapshot(&self, timeout_ms: u64) -> TlcResult<Option<OFrame>> {
+        self.set_frames_per_trigger(Frames::Limited(1))?;
+        self.arm(2)?;
+        self.trigger()?;
+
+        let frame = self.wait_for_frame(timeout_ms)?;
 
         self.disarm()?;
 
@@ -459,9 +484,9 @@ impl<'a> Camera<'a> {
     }
 
     // VERY BUGGY DOES NOT WORK
-    /*pub fn for_frames<F>(&self, n: usize, timeout_ms: usize, mut f: F)
+    /*pub fn for_frames<F>(&self, n: usize, timeout_ms: u64, mut f: F)
     -> TlcResult<()> where F: FnMut(OFrame) {
-        let roi = self.roi()?;
+        let roi = self.roi;
         let img_len = roi.area();
         let (tx, rx) = mpsc::channel::<Vec<u16>>();
         let mut ctx = (img_len, tx);
@@ -475,7 +500,7 @@ impl<'a> Camera<'a> {
         use std::time::Duration;
 
         for i in 0..n {
-            let img = rx.recv_timeout(Duration::from_millis(timeout_ms as u64));
+            let img = rx.recv_timeout(Duration::from_millis(timeout_ms));
 
             let Ok(img) = img else {
                 self.disarm()?;
