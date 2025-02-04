@@ -27,6 +27,12 @@ type SetImagePollTimeoutFn = unsafe extern fn(handle_t, c_int) -> c_int;
 type ArmFn = unsafe extern fn(handle_t, c_int) -> c_int;
 type DisarmFn = unsafe extern fn(handle_t) -> c_int;
 type IssueSoftwareTriggerFn = unsafe extern fn(handle_t) -> c_int;
+type GetBinxFn = unsafe extern fn(handle_t, *mut c_int) -> c_int;
+type GetBinyFn = unsafe extern fn(handle_t, *mut c_int) -> c_int;
+type GetBinxRangeFn = unsafe extern fn(handle_t, *mut c_int, *mut c_int) -> c_int;
+type GetBinyRangeFn = unsafe extern fn(handle_t, *mut c_int, *mut c_int) -> c_int;
+type SetBinxFn = unsafe extern fn(handle_t, c_int) -> c_int;
+type SetBinyFn = unsafe extern fn(handle_t, c_int) -> c_int;
 
 type SetFrameAvailableCallbackFn = unsafe extern fn(
     handle_t, Option<FrameCallbackPtr>, *mut c_void
@@ -161,24 +167,42 @@ pub struct Roi {
     pub x0: usize,
     pub y0: usize,
     pub x1: usize,
-    pub y1: usize
+    pub y1: usize,
+    pub bin_x: usize,
+    pub bin_y: usize
 }
 
 impl Roi {
-    pub fn area(&self) -> usize {
-        self.width()*self.height()
+    pub fn real_area(&self) -> usize {
+        self.real_width()*self.real_height()
     }
 
-    pub fn width(&self) -> usize {
+    pub fn image_area(&self) -> usize {
+        self.image_width()*self.image_height()
+    }
+
+    pub fn real_width(&self) -> usize {
         self.x0.abs_diff(self.x1)
     }
 
-    pub fn height(&self) -> usize {
+    pub fn image_width(&self) -> usize {
+        self.real_width()/self.bin_x
+    }
+
+    pub fn real_height(&self) -> usize {
         self.y0.abs_diff(self.y1)
     }
 
-    pub fn dim(&self) -> (usize, usize) {
-        (self.width(), self.height())
+    pub fn image_height(&self) -> usize {
+        self.real_height()/self.bin_y
+    }
+
+    pub fn real_dim(&self) -> (usize, usize) {
+        (self.real_width(), self.real_height())
+    }
+
+    pub fn image_dim(&self) -> (usize, usize) {
+        (self.image_width(), self.image_height())
     }
 }
 
@@ -198,7 +222,7 @@ impl<D: AsRef<[u16]>> Index<[usize; 2]> for Frame<D> {
     type Output = u16;
 
     fn index(&self, idx: [usize; 2]) -> &u16 {
-        let (w, h) = self.roi.dim();
+        let (w, h) = self.roi.image_dim();
 
         if idx[0] >= w { panic!("x index out of range in frame"); }
         if idx[1] >= h { panic!("y index out of range in frame"); }
@@ -209,12 +233,26 @@ impl<D: AsRef<[u16]>> Index<[usize; 2]> for Frame<D> {
 
 impl<D: AsRef<[u16]> + AsMut<[u16]>> IndexMut<[usize; 2]> for Frame<D> {
     fn index_mut(&mut self, idx: [usize; 2]) -> &mut u16 {
-        let (w, h) = self.roi.dim();
+        let (w, h) = self.roi.image_dim();
 
         if idx[0] >= w { panic!("x index out of range in frame"); }
         if idx[1] >= h { panic!("y index out of range in frame"); }
 
         &mut self.data.as_mut()[w*idx[1]+idx[0]]
+    }
+}
+
+impl<D: AsRef<[u16]>> Frame<D> {
+    pub fn width(&self) -> usize {
+        self.roi.image_width()
+    }
+
+    pub fn height(&self) -> usize {
+        self.roi.image_height()
+    }
+
+    pub fn dim(&self) -> (usize, usize) {
+        (self.width(), self.height())
     }
 }
 
@@ -257,6 +295,7 @@ impl<'a> Camera<'a> {
     // operations involving the ROI can set/get the cached version, and send it
     // to the camera when necessary.
     fn update_roi(&mut self) -> TlcResult<()> {
+        let (bin_x, bin_y) = self.bin_size()?;
         let (mut x0, mut y0, mut x1, mut y1) = (0, 0, 0, 0);
 
         tlc_call!(
@@ -268,6 +307,8 @@ impl<'a> Camera<'a> {
         self.roi.y0 = y0 as usize;
         self.roi.x1 = x1 as usize+1;
         self.roi.y1 = y1 as usize+1;
+        self.roi.bin_x = bin_x;
+        self.roi.bin_y = bin_y;
 
         Ok(())
     }
@@ -410,7 +451,7 @@ impl<'a> Camera<'a> {
 
         if img_ptr.is_null() { return Ok(None); }
 
-        let img_len = self.roi.area();
+        let img_len = self.roi.image_area();
         let img = unsafe {
             std::slice::from_raw_parts(img_ptr, img_len)
         };
@@ -522,6 +563,49 @@ impl<'a> Camera<'a> {
         self.disarm()?;
         self.remove_frame_callback()
     }*/
+
+    pub fn bin_size(&self) -> TlcResult<(usize, usize)> {
+        let (mut w, mut h) = (0, 0);
+
+        tlc_call!(
+            &self.lib, "tl_camera_get_binx", GetBinxFn; self.handle, &mut w
+        )?;
+
+        tlc_call!(
+            &self.lib, "tl_camera_get_biny", GetBinyFn; self.handle, &mut h
+        )?;
+
+        Ok((w as usize, h as usize))
+    }
+
+    pub fn set_bin_size(&mut self, w: usize, h: usize) -> TlcResult<()> {
+        tlc_call!(
+            &self.lib, "tl_camera_set_binx", SetBinxFn; self.handle, w as c_int
+        )?;
+
+        tlc_call!(
+            &self.lib, "tl_camera_set_biny", SetBinyFn; self.handle, h as c_int
+        )?;
+
+        self.update_roi()
+    }
+
+    pub fn bin_range(&self) -> TlcResult<(usize, usize, usize, usize)> {
+        let (mut w_min, mut w_max) = (0, 0);
+        let (mut h_min, mut h_max) = (0, 0);
+
+        tlc_call!(
+            &self.lib, "tl_camera_get_binx_range", GetBinxRangeFn;
+            self.handle, &mut w_min, &mut w_max
+        )?;
+        
+        tlc_call!(
+            &self.lib, "tl_camera_get_biny_range", GetBinyRangeFn;
+            self.handle, &mut h_min, &mut h_max
+        )?;
+
+        Ok((w_min as usize, w_max as usize, h_min as usize, h_max as usize))
+    }
 }
 
 type FrameCallbackPtr = unsafe extern "C" fn(
