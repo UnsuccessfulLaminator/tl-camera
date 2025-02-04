@@ -3,7 +3,7 @@ use std::ffi::{CStr, CString, OsStr};
 use std::ffi::{c_int, c_uint, c_char, c_void, c_longlong, c_double};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
-use std::sync::mpsc;
+// use std::sync::mpsc;
 
 
 
@@ -34,9 +34,9 @@ type GetBinyRangeFn = unsafe extern fn(handle_t, *mut c_int, *mut c_int) -> c_in
 type SetBinxFn = unsafe extern fn(handle_t, c_int) -> c_int;
 type SetBinyFn = unsafe extern fn(handle_t, c_int) -> c_int;
 
-type SetFrameAvailableCallbackFn = unsafe extern fn(
-    handle_t, Option<FrameCallbackPtr>, *mut c_void
-) -> c_int;
+// type SetFrameAvailableCallbackFn = unsafe extern fn(
+//     handle_t, Option<FrameCallbackPtr>, *mut c_void
+// ) -> c_int;
 
 type GetPendingFrameOrNullFn = unsafe extern fn(
     handle_t, *mut *const u16, *mut c_int, *mut *const c_char, *mut c_int
@@ -507,22 +507,22 @@ impl<'a> Camera<'a> {
         Ok(frame)
     }
 
-    fn set_frame_callback_raw(&self, f: FrameCallbackPtr, ctx: *mut c_void)
-    -> TlcResult<()> {
-        tlc_call!(
-            &self.lib, "tl_camera_set_frame_available_callback",
-            SetFrameAvailableCallbackFn;
-            self.handle, Some(f), ctx
-        )
-    }
-    
-    fn remove_frame_callback(&self) -> TlcResult<()> {
-        tlc_call!(
-            &self.lib, "tl_camera_set_frame_available_callback",
-            SetFrameAvailableCallbackFn;
-            self.handle, None, std::ptr::null_mut()
-        )
-    }
+    // fn set_frame_callback_raw(&self, f: FrameCallbackPtr, ctx: *mut c_void)
+    // -> TlcResult<()> {
+    //     tlc_call!(
+    //         &self.lib, "tl_camera_set_frame_available_callback",
+    //         SetFrameAvailableCallbackFn;
+    //         self.handle, Some(f), ctx
+    //     )
+    // }
+    // 
+    // fn remove_frame_callback(&self) -> TlcResult<()> {
+    //     tlc_call!(
+    //         &self.lib, "tl_camera_set_frame_available_callback",
+    //         SetFrameAvailableCallbackFn;
+    //         self.handle, None, std::ptr::null_mut()
+    //     )
+    // }
 
     // VERY BUGGY DOES NOT WORK
     /*pub fn for_frames<F>(&self, n: usize, timeout_ms: u64, mut f: F)
@@ -608,21 +608,21 @@ impl<'a> Camera<'a> {
     }
 }
 
-type FrameCallbackPtr = unsafe extern "C" fn(
-    handle_t, *mut u16, c_int, *mut c_char, c_int, *mut c_void
-);
+// type FrameCallbackPtr = unsafe extern "C" fn(
+//     handle_t, *mut u16, c_int, *mut c_char, c_int, *mut c_void
+// );
 
 // Callback for taking a frame and copying its contents to a vector,
 // which is sent back to the main thread by a channel
-unsafe extern "C" fn snapshot_cb(
-    handle: handle_t, img_ptr: *mut u16, frame_idx: c_int,
-    metadata: *mut c_char, metadata_len: c_int,
-    ctx: *mut c_void
-) {
-    let ctx = ctx as *mut (usize, mpsc::Sender<Vec<u16>>);
-    let img_len = (*ctx).0;
-    let tx = &(*ctx).1;
-    let img = unsafe { std::slice::from_raw_parts(img_ptr, img_len) };
-
-    tx.send(img.to_vec()).unwrap();
-}
+// unsafe extern "C" fn snapshot_cb(
+//     handle: handle_t, img_ptr: *mut u16, frame_idx: c_int,
+//     metadata: *mut c_char, metadata_len: c_int,
+//     ctx: *mut c_void
+// ) {
+//     let ctx = ctx as *mut (usize, mpsc::Sender<Vec<u16>>);
+//     let img_len = (*ctx).0;
+//     let tx = &(*ctx).1;
+//     let img = unsafe { std::slice::from_raw_parts(img_ptr, img_len) };
+// 
+//     tx.send(img.to_vec()).unwrap();
+// }
