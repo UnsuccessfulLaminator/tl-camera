@@ -33,6 +33,7 @@ type GetBinxRangeFn = unsafe extern fn(handle_t, *mut c_int, *mut c_int) -> c_in
 type GetBinyRangeFn = unsafe extern fn(handle_t, *mut c_int, *mut c_int) -> c_int;
 type SetBinxFn = unsafe extern fn(handle_t, c_int) -> c_int;
 type SetBinyFn = unsafe extern fn(handle_t, c_int) -> c_int;
+type GetBitDepthFn = unsafe extern fn(handle_t, *mut c_int) -> c_int;
 
 // type SetFrameAvailableCallbackFn = unsafe extern fn(
 //     handle_t, Option<FrameCallbackPtr>, *mut c_void
@@ -605,6 +606,17 @@ impl<'a> Camera<'a> {
         )?;
 
         Ok((w_min as usize, w_max as usize, h_min as usize, h_max as usize))
+    }
+
+    pub fn bit_depth(&self) -> TlcResult<usize> {
+        let mut depth = 0;
+
+        tlc_call!(
+            &self.lib, "tl_camera_get_bit_depth", GetBitDepthFn;
+            self.handle, &mut depth
+        )?;
+
+        Ok(depth as usize)
     }
 }
 
