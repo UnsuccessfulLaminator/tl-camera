@@ -3,12 +3,16 @@ use std::ffi::{CStr, CString, OsStr};
 use std::ffi::{c_int, c_uint, c_char, c_void, c_longlong, c_double};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
-// use std::sync::mpsc;
 
 
 
 #[allow(non_camel_case_types)]
 type handle_t = *const c_void;
+
+#[allow(dead_code)]
+type FrameCallbackPtr = unsafe extern "C" fn(
+    handle_t, *mut u16, c_int, *mut c_char, c_int, *mut c_void
+);
 
 type OpenSdkFn = unsafe extern fn() -> c_int;
 type CloseSdkFn = unsafe extern fn() -> c_int;
@@ -35,9 +39,10 @@ type SetBinxFn = unsafe extern fn(handle_t, c_int) -> c_int;
 type SetBinyFn = unsafe extern fn(handle_t, c_int) -> c_int;
 type GetBitDepthFn = unsafe extern fn(handle_t, *mut c_int) -> c_int;
 
-// type SetFrameAvailableCallbackFn = unsafe extern fn(
-//     handle_t, Option<FrameCallbackPtr>, *mut c_void
-// ) -> c_int;
+#[allow(dead_code)]
+type SetFrameAvailableCallbackFn = unsafe extern fn(
+    handle_t, Option<FrameCallbackPtr>, *mut c_void
+) -> c_int;
 
 type GetPendingFrameOrNullFn = unsafe extern fn(
     handle_t, *mut *const u16, *mut c_int, *mut *const c_char, *mut c_int
@@ -482,18 +487,29 @@ impl<'a> Camera<'a> {
         })
     }
 
-    pub fn wait_for_frame(&self, timeout_ms: u64)
-    -> TlcResult<Option<OFrame>> {
+    pub fn map_await_frame<F, R>(&self, timeout_ms: u64, mut f: F)
+    -> TlcResult<Option<R>> where F: FnMut(BFrame) -> R {
         let inst = std::time::Instant::now();
-        let mut frame = None;
-        
-        while (inst.elapsed().as_millis() as u64) < timeout_ms {
-            frame = self.pending_frame()?;
+        let mut result = None;
 
-            if frame.is_some() { break; }
+        while (inst.elapsed().as_millis() as u64) < timeout_ms {
+            result = self.map_pending_frame(&mut f)?;
+
+            if result.is_some() { break; }
         }
 
-        Ok(frame)
+        Ok(result)
+    }
+
+    pub fn await_frame(&self, timeout_ms: u64) -> TlcResult<Option<OFrame>> {
+        self.map_await_frame(timeout_ms, |f| {
+            OFrame {
+                data: f.data.to_vec(),
+                roi: f.roi,
+                index: f.index,
+                metadata: f.metadata
+            }
+        })
     }
 
     pub fn snapshot(&self, timeout_ms: u64) -> TlcResult<Option<OFrame>> {
@@ -501,69 +517,23 @@ impl<'a> Camera<'a> {
         self.arm(2)?;
         self.trigger()?;
 
-        let frame = self.wait_for_frame(timeout_ms)?;
+        let frame = self.await_frame(timeout_ms)?;
 
         self.disarm()?;
 
         Ok(frame)
     }
 
-    // fn set_frame_callback_raw(&self, f: FrameCallbackPtr, ctx: *mut c_void)
-    // -> TlcResult<()> {
-    //     tlc_call!(
-    //         &self.lib, "tl_camera_set_frame_available_callback",
-    //         SetFrameAvailableCallbackFn;
-    //         self.handle, Some(f), ctx
-    //     )
-    // }
-    // 
-    // fn remove_frame_callback(&self) -> TlcResult<()> {
-    //     tlc_call!(
-    //         &self.lib, "tl_camera_set_frame_available_callback",
-    //         SetFrameAvailableCallbackFn;
-    //         self.handle, None, std::ptr::null_mut()
-    //     )
-    // }
-
-    // VERY BUGGY DOES NOT WORK
-    /*pub fn for_frames<F>(&self, n: usize, timeout_ms: u64, mut f: F)
-    -> TlcResult<()> where F: FnMut(OFrame) {
-        let roi = self.roi;
-        let img_len = roi.area();
-        let (tx, rx) = mpsc::channel::<Vec<u16>>();
-        let mut ctx = (img_len, tx);
-        let ctx_ptr = &mut ctx as *mut _ as *mut c_void;
-
-        self.set_frame_callback_raw(snapshot_cb, ctx_ptr)?;
-        self.set_frames_per_trigger(Frames::Limited(n))?;
-        self.arm(2)?;
-        self.trigger()?;
-
-        use std::time::Duration;
-
-        for i in 0..n {
-            let img = rx.recv_timeout(Duration::from_millis(timeout_ms));
-
-            let Ok(img) = img else {
-                self.disarm()?;
-                self.remove_frame_callback()?;
-
-                return Err(TlcError("snapshot timed out".to_string()));
-            };
-
-            let frame = OFrame {
-                data: img,
-                roi: roi,
-                index: i,
-                metadata: vec![]
-            };
-
-            f(frame);
-        }
-
-        self.disarm()?;
-        self.remove_frame_callback()
-    }*/
+    #[allow(dead_code)]
+    fn set_frame_callback_raw(
+        &self, f: Option<FrameCallbackPtr>, ctx: *mut c_void
+    ) -> TlcResult<()> {
+        tlc_call!(
+            &self.lib, "tl_camera_set_frame_available_callback",
+            SetFrameAvailableCallbackFn;
+            self.handle, f, ctx
+        )
+    }
 
     pub fn bin_size(&self) -> TlcResult<(usize, usize)> {
         let (mut w, mut h) = (0, 0);
@@ -619,22 +589,3 @@ impl<'a> Camera<'a> {
         Ok(depth as usize)
     }
 }
-
-// type FrameCallbackPtr = unsafe extern "C" fn(
-//     handle_t, *mut u16, c_int, *mut c_char, c_int, *mut c_void
-// );
-
-// Callback for taking a frame and copying its contents to a vector,
-// which is sent back to the main thread by a channel
-// unsafe extern "C" fn snapshot_cb(
-//     handle: handle_t, img_ptr: *mut u16, frame_idx: c_int,
-//     metadata: *mut c_char, metadata_len: c_int,
-//     ctx: *mut c_void
-// ) {
-//     let ctx = ctx as *mut (usize, mpsc::Sender<Vec<u16>>);
-//     let img_len = (*ctx).0;
-//     let tx = &(*ctx).1;
-//     let img = unsafe { std::slice::from_raw_parts(img_ptr, img_len) };
-// 
-//     tx.send(img.to_vec()).unwrap();
-// }
