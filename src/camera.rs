@@ -3,13 +3,14 @@ use std::ffi::{CStr, CString, OsStr};
 use std::ffi::{c_int, c_uint, c_char, c_void, c_longlong, c_double};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
+use std::sync::mpsc::Sender;
+use strum_macros::FromRepr;
 
 
 
 #[allow(non_camel_case_types)]
 type handle_t = *const c_void;
 
-#[allow(dead_code)]
 type FrameCallbackPtr = unsafe extern "C" fn(
     handle_t, *mut u16, c_int, *mut c_char, c_int, *mut c_void
 );
@@ -38,8 +39,9 @@ type GetBinyRangeFn = unsafe extern fn(handle_t, *mut c_int, *mut c_int) -> c_in
 type SetBinxFn = unsafe extern fn(handle_t, c_int) -> c_int;
 type SetBinyFn = unsafe extern fn(handle_t, c_int) -> c_int;
 type GetBitDepthFn = unsafe extern fn(handle_t, *mut c_int) -> c_int;
+type GetOperationModeFn = unsafe extern fn(handle_t, *mut c_uint) -> c_int;
+type SetOperationModeFn = unsafe extern fn(handle_t, c_uint) -> c_int;
 
-#[allow(dead_code)]
 type SetFrameAvailableCallbackFn = unsafe extern fn(
     handle_t, Option<FrameCallbackPtr>, *mut c_void
 ) -> c_int;
@@ -74,6 +76,19 @@ unsafe fn get_last_error(lib: &Library) -> TlcError {
         TlcError(error)
     }
     else { panic!("couldn't get error status") }
+}
+
+
+
+// Really I should use bindgen's enum values here, but bindgen chooses types
+// badly in this case and it generates names like it's writing a sequel to
+// Ulysses.
+#[derive(FromRepr)]
+#[repr(C)]
+pub enum Trigger {
+    Software = 0,
+    Hardware = 1,
+    Bulb = 2
 }
 
 
@@ -264,11 +279,19 @@ impl<D: AsRef<[u16]>> Frame<D> {
 
 
 
+struct CallbackContext {
+    tx: Sender<OFrame>,
+    roi: Roi
+}
+
+
+
 pub struct Camera<'a> {
     lib: &'a Library,
     handle: handle_t,
     id: String,
-    roi: Roi
+    roi: Roi,
+    cb_ctx: Option<Box<CallbackContext>>
 }
 
 impl<'a> Drop for Camera<'a> {
@@ -287,7 +310,8 @@ impl<'a> Camera<'a> {
         let mut cam = Self {
             lib, handle,
             id: id.to_string(),
-            roi: Roi::default()
+            roi: Roi::default(),
+            cb_ctx: None
         };
 
         cam.set_frame_timeout_ms(10)?;
@@ -524,18 +548,39 @@ impl<'a> Camera<'a> {
         Ok(frame)
     }
 
-    pub fn cb_test(&self) -> TlcResult<()> {
+    pub fn set_frame_queue(&mut self, tx: Sender<OFrame>) -> TlcResult<()> {
         unsafe extern "C" fn cb(
-            _handle: handle_t, _img: *mut u16, frame_idx: c_int,
-            _metadata: *mut c_char, _metadata_len: c_int, _ctx: *mut c_void
+            _handle: handle_t, img_ptr: *mut u16, frame_idx: c_int,
+            _metadata: *mut c_char, _metadata_len: c_int, ctx: *mut c_void
         ) {
-            println!("Callback got frame index {frame_idx}");
-        }
+            let ctx = ctx as *mut CallbackContext;
+            let tx = &(*ctx).tx;
+            let img_len = (*ctx).roi.image_area();
+            let img = unsafe { std::slice::from_raw_parts(img_ptr, img_len) };
 
-        self.set_frame_callback_raw(Some(cb), std::ptr::null_mut())
+            let frame = OFrame {
+                data: img.to_vec(),
+                roi: (*ctx).roi,
+                index: frame_idx as usize,
+                metadata: vec![]
+            };
+
+            let _ = tx.send(frame);
+        }
+        
+        let mut ctx = Box::new(CallbackContext {
+            tx: tx,
+            roi: self.roi
+        });
+
+        let ctx_ptr = ctx.as_mut() as *mut CallbackContext;
+        let r = self.set_frame_callback_raw(Some(cb), ctx_ptr as *mut c_void);
+
+        if r.is_ok() { self.cb_ctx = Some(ctx); }
+
+        r
     }
 
-    #[allow(dead_code)]
     fn set_frame_callback_raw(
         &self, f: Option<FrameCallbackPtr>, ctx: *mut c_void
     ) -> TlcResult<()> {
@@ -598,5 +643,27 @@ impl<'a> Camera<'a> {
         )?;
 
         Ok(depth as usize)
+    }
+
+    pub fn trigger_mode(&self) -> TlcResult<Trigger> {
+        let mut mode_id = 0;
+
+        tlc_call!(
+            &self.lib, "tl_camera_get_operation_mode", GetOperationModeFn;
+            self.handle, &mut mode_id
+        )?;
+
+        Trigger::from_repr(mode_id.try_into().unwrap())
+            .ok_or("SDK returned invalid trigger mode enum value")
+            .map_err(|e| TlcError(e.to_string()))
+    }
+
+    pub fn set_trigger_mode(&self, mode: Trigger) -> TlcResult<()> {
+        let mode_id = mode as c_uint;
+
+        tlc_call!(
+            &self.lib, "tl_camera_set_operation_mode", SetOperationModeFn;
+            self.handle, mode_id
+        )
     }
 }
