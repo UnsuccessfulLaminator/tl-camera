@@ -54,6 +54,10 @@ type GetRoiFn = unsafe extern fn(
     handle_t, *mut c_int, *mut c_int, *mut c_int, *mut c_int
 ) -> c_int;
 
+type SetRoiFn = unsafe extern fn(handle_t, c_int, c_int, c_int, c_int) -> c_int;
+
+
+
 macro_rules! tlc_call {
     ($lib:expr, $name:expr, $sig:ty; $($arg:expr),*) => {
         unsafe {
@@ -345,6 +349,21 @@ impl<'a> Camera<'a> {
 
     pub fn roi(&self) -> Roi {
         self.roi
+    }
+
+    pub fn set_roi(&mut self, x0: usize, y0: usize, x1: usize, y1: usize)
+    -> TlcResult<()> {
+        tlc_call!(
+            &self.lib, "tl_camera_set_roi", SetRoiFn;
+            self.handle, x0 as c_int, y0 as c_int, x1 as c_int-1, y1 as c_int-1
+        )?;
+
+        self.roi.x0 = x0;
+        self.roi.y0 = y0;
+        self.roi.x1 = x1;
+        self.roi.y1 = y1;
+
+        Ok(())
     }
 
     pub fn id(&self) -> &str {
