@@ -45,7 +45,7 @@ type SetFrameAvailableCallbackFn = unsafe extern fn(
 ) -> c_int;
 
 type GetPendingFrameOrNullFn = unsafe extern fn(
-    handle_t, *mut *const u16, *mut c_int, *mut *const c_char, *mut c_int
+    handle_t, *mut *mut u16, *mut c_int, *mut *const c_char, *mut c_int
 ) -> c_int;
 
 type GetRoiFn = unsafe extern fn(
@@ -222,7 +222,7 @@ pub struct Frame<D: AsRef<[u16]>> {
 }
 
 pub type OFrame = Frame<Vec<u16>>;
-pub type BFrame<'a> = Frame<&'a [u16]>;
+pub type BFrame<'a> = Frame<&'a mut [u16]>;
 
 impl<D: AsRef<[u16]>> Index<[usize; 2]> for Frame<D> {
     type Output = u16;
@@ -443,7 +443,7 @@ impl<'a> Camera<'a> {
 
     pub fn map_pending_frame<F, R>(&self, mut f: F) -> TlcResult<Option<R>>
     where F: FnMut(BFrame) -> R {
-        let mut img_ptr = std::ptr::null();
+        let mut img_ptr = std::ptr::null_mut();
         let mut frame_idx = 0;
         let mut metadata_ptr = std::ptr::null();
         let mut metadata_len = 0;
@@ -459,7 +459,7 @@ impl<'a> Camera<'a> {
 
         let img_len = self.roi.image_area();
         let img = unsafe {
-            std::slice::from_raw_parts(img_ptr, img_len)
+            std::slice::from_raw_parts_mut(img_ptr, img_len)
         };
 
         let metadata = unsafe {
@@ -522,6 +522,17 @@ impl<'a> Camera<'a> {
         self.disarm()?;
 
         Ok(frame)
+    }
+
+    pub fn cb_test(&self) -> TlcResult<()> {
+        unsafe extern "C" fn cb(
+            _handle: handle_t, _img: *mut u16, frame_idx: c_int,
+            _metadata: *mut c_char, _metadata_len: c_int, _ctx: *mut c_void
+        ) {
+            println!("Callback got frame index {frame_idx}");
+        }
+
+        self.set_frame_callback_raw(Some(cb), std::ptr::null_mut())
     }
 
     #[allow(dead_code)]
