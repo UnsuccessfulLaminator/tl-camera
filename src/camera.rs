@@ -22,6 +22,7 @@ type DiscoverAvailableCamerasFn = unsafe extern fn(*mut c_char, c_int) -> c_int;
 type OpenCameraFn = unsafe extern fn(*const c_char, *mut handle_t) -> c_int;
 type CloseCameraFn = unsafe extern fn(handle_t) -> c_int;
 type SetExposureTimeFn = unsafe extern fn(handle_t, c_longlong) -> c_int;
+type GetExposureTimeFn = unsafe extern fn(handle_t, *mut c_longlong) -> c_int;
 type GetGainRangeFn = unsafe extern fn(handle_t, *mut c_int, *mut c_int) -> c_int;
 type ConvertGainToDbFn = unsafe extern fn(handle_t, c_int, *mut c_double) -> c_int;
 type ConvertDbToGainFn = unsafe extern fn(handle_t, c_double, *mut c_int) -> c_int;
@@ -370,6 +371,17 @@ impl<'a> Camera<'a> {
         &self.id
     }
 
+    pub fn exposure_us(&self) -> TlcResult<usize> {
+        let mut t = 0;
+
+        tlc_call!(
+            &self.lib, "tl_camera_get_exposure_time", GetExposureTimeFn;
+            self.handle, &mut t
+        )?;
+
+        Ok(t as usize)
+    }
+
     pub fn set_exposure_us(&self, t: usize) -> TlcResult<()> {
         tlc_call!(
             &self.lib, "tl_camera_set_exposure_time", SetExposureTimeFn;
@@ -557,6 +569,7 @@ impl<'a> Camera<'a> {
 
     pub fn snapshot(&self, timeout_ms: u64) -> TlcResult<Option<OFrame>> {
         self.set_frames_per_trigger(Frames::Limited(1))?;
+        self.set_trigger_mode(Trigger::Software)?;
         self.arm(2)?;
         self.trigger()?;
 
@@ -598,6 +611,11 @@ impl<'a> Camera<'a> {
         if r.is_ok() { self.cb_ctx = Some(ctx); }
 
         r
+    }
+
+    pub fn remove_frame_queue(&mut self) -> TlcResult<()> {
+        self.cb_ctx = None;
+        self.set_frame_callback_raw(None, std::ptr::null_mut())
     }
 
     fn set_frame_callback_raw(
