@@ -280,6 +280,15 @@ impl<D: AsRef<[u16]>> Frame<D> {
     pub fn dim(&self) -> (usize, usize) {
         (self.width(), self.height())
     }
+
+    pub fn to_owned(&self) -> OFrame {
+        OFrame {
+            data: self.data.as_ref().to_vec(),
+            roi: self.roi,
+            index: self.index,
+            metadata: self.metadata.clone()
+        }
+    }
 }
 
 
